@@ -47,6 +47,16 @@ def get_s3_file_list(s3_client, bucket, S3Prefix):
     return __des_file_list
 
 
+def wait_sqs_availability(sqs, sqs_queue):
+    while True:
+        try:
+            sqs.get_queue_attributes(QueueUrl=sqs_queue)
+            return
+        except Exception as e:
+            logger.warning('Waiting for SQS availability')
+            time.sleep(5)
+
+
 def job_upload_sqs_ddb(sqs, sqs_queue, table, file_list):
     sqs_batch = 0
     sqs_message = []
@@ -72,3 +82,12 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, file_list):
                 logger.error(str(e)+'-->Fail to upload sqs: '+str(sqs_message))
     logger.info('Complete upload job to queue: ' + sqs_queue)
     return
+
+
+def wait_sqs_available(sqs, table_queue_name):
+    while True:
+        try:
+            return sqs.get_queue_url(QueueName=table_queue_name)['QueueUrl']
+        except Exception as e:
+            logger.warning('Waiting for SQS availability. '+str(e))
+            time.sleep(5)
