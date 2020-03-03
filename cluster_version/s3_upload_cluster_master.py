@@ -4,14 +4,34 @@ import os
 import boto3
 import requests
 
-from s3_upload_utility import get_s3_file_list, job_upload_sqs_ddb
+from s3_upload_utility import get_s3_file_list, job_upload_sqs_ddb, wait_sqs_available
 
 # Main
 if __name__ == '__main__':
     # Set Source s3 bucket
-    s3_src_bucket = 'broad-references'
+
     s3_src_prefix = ''
     ##############
+
+    # Set environment
+    if os.uname()[0] == 'Linux':  # on EC2, use EC2 role
+        region = json.loads(requests.get(
+            'http://169.254.169.254/latest/dynamic/instance-identity/document').text)['region']
+        s3_src_client = boto3.client('s3', region)
+        sqs = boto3.client('sqs', region)
+        dynamodb = boto3.resource('dynamodb', region)
+        ssm = boto3.client('ssm', region)
+    else:  # on Local machine, use aws config profile
+        src_session = boto3.session.Session(profile_name='iad')
+        s3_src_client = src_session.client('s3')
+        sqs = src_session.client('sqs')
+        dynamodb = src_session.resource('dynamodb')
+        ssm = src_session.client('ssm')
+    s3_src_bucket = ssm.get_parameter(Name='s3_upload_bucket_name')['Parameter']['Value']
+    table_queue_name = 's3_upload_file_list-'+s3_src_bucket
+    table = dynamodb.Table(table_queue_name)
+    table.wait_until_exists()
+    sqs_queue = wait_sqs_available(sqs, table_queue_name)
 
     # Configure logging
     LoggingLevel = 'INFO'
@@ -29,22 +49,6 @@ if __name__ == '__main__':
     elif LoggingLevel == 'DEBUG':
         logger.setLevel(logging.DEBUG)
     ############
-    # Set environment
-    if os.uname()[0] == 'Linux':  # on EC2, use EC2 role
-        region = json.loads(requests.get(
-            'http://169.254.169.254/latest/dynamic/instance-identity/document').text)['region']
-        s3_src_client = boto3.client('s3', region)
-        sqs = boto3.client('sqs', region)
-        dynamodb = boto3.resource('dynamodb', region)
-    else:  # on Local machine, use aws config profile
-        src_session = boto3.session.Session(profile_name='iad')
-        s3_src_client = src_session.client('s3')
-        sqs = src_session.client('sqs')
-        dynamodb = src_session.resource('dynamodb')
-    table_queue_name = 's3_upload_file_list-'+s3_src_bucket
-    table = dynamodb.Table(table_queue_name)
-    sqs_queue = sqs.get_queue_url(QueueName=table_queue_name)['QueueUrl']
-
     # Program start processing here
     file_list = get_s3_file_list(s3_src_client, s3_src_bucket, s3_src_prefix)
     job_upload_sqs_ddb(sqs, sqs_queue, table, file_list)
