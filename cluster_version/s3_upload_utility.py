@@ -69,6 +69,6 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, file_list):
                     sqs_batch = 0
                     sqs_message = []
             except Exception as e:
-                logger.error(str(e)+'-->Fail to upload index: '+str(index))
+                logger.error(str(e)+'-->Fail to upload sqs: '+str(sqs_message))
     logger.info('Complete upload job to queue: ' + sqs_queue)
     return
