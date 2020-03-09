@@ -9,7 +9,8 @@ from s3_migration_lib import get_s3_file_list, job_upload_sqs_ddb, set_env, \
 # Read config.ini
 cfg = ConfigParser()
 try:
-    cfg.read('s3_migration_cluster_config.ini')
+    file_path = os.path.split(os.path.abspath(__file__))[0]
+    cfg.read(f'{file_path}/s3_migration_cluster_config.ini')
     table_queue_name = cfg.get('Basic', 'table_queue_name')
     ssm_parameter_bucket = cfg.get('Basic', 'ssm_parameter_bucket')
     ssm_parameter_credentials = cfg.get('Basic', 'ssm_parameter_credentials')
@@ -50,7 +51,8 @@ if __name__ == '__main__':
         job_list = delta_job_list(src_file_list, des_file_list, bucket_para)
 
         logger.info('Writing job list to local file backup...')
-        local_backup_list = f'./s3_migration_log/job-list-{src_bucket}.json'
+        log_path = os.path.split(os.path.abspath(__file__))[0] + '/s3_migration_log'
+        local_backup_list = f'{log_path}/job-list-{src_bucket}.json'
         with open(local_backup_list, 'w') as f:
             json.dump(job_list, f)  # 仅做备份检查用
         logger.info(f'Finish writing: {os.path.abspath(local_backup_list)}')

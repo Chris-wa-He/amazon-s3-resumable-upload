@@ -9,7 +9,8 @@ from s3_migration_lib import set_env, set_log, job_looper
 # Read config.ini
 cfg = ConfigParser()
 try:
-    cfg.read('s3_migration_cluster_config.ini')
+    file_path = os.path.split(os.path.abspath(__file__))[0]
+    cfg.read(f'{file_path}/s3_migration_cluster_config.ini')
     table_queue_name = cfg.get('Basic', 'table_queue_name')
     ssm_parameter_bucket = cfg.get('Basic', 'ssm_parameter_bucket')
     ssm_parameter_credentials = cfg.get('Basic', 'ssm_parameter_credentials')

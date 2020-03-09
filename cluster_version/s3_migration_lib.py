@@ -15,6 +15,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 
 # Configure logging
@@ -26,16 +27,18 @@ def set_log(LoggingLevel):
     elif LoggingLevel == 'DEBUG':
         _logger.setLevel(logging.DEBUG)
     # File logging
-    if not os.path.exists('s3_migration_log'):
-        os_response = os.system("mkdir s3_migration_log")
-        print('Created folder ./s3_migration_log')
+    file_path = os.path.split(os.path.abspath(__file__))[0]
+    log_path = file_path + '/s3_migration_log'
+    if not os.path.exists(log_path):
+        os.system(f"mkdir {log_path}")
+        print(f'Created folder {log_path}')
     else:
-        print('Folder exist ./s3_migration_log')
+        print(f'Folder exist {log_path}')
     this_file_name = os.path.splitext(os.path.basename(__file__))[0]
     t = time.localtime()
     start_time = f'{t.tm_year}-{t.tm_mon}-{t.tm_mday}-{t.tm_hour}-{t.tm_min}-{t.tm_sec}'
-    _log_file_name = './s3_migration_log/' + this_file_name + '-' + start_time + '.log'
-    print('Logging level:', LoggingLevel, 'Log file:', os.path.abspath(_log_file_name))
+    _log_file_name = f'{log_path}/{this_file_name}-{start_time}.log'
+    print('Logging level:', LoggingLevel, 'Log file:', _log_file_name)
     fileHandler = logging.FileHandler(filename=_log_file_name)
     fileHandler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s - %(message)s'))
     _logger.addHandler(fileHandler)
@@ -207,7 +210,6 @@ def wait_sqs_available(sqs, table_queue_name):
 
 
 def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
-
     sqs_batch = 0
     sqs_message = []
     logger.info(f'Start uploading jobs to queue: {sqs_queue}')
@@ -215,7 +217,7 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
     with table.batch_writer() as ddb_batch:
         for job in job_list:
             # write to ddb, auto batch
-            for retry in range(MaxRetry+1):
+            for retry in range(MaxRetry + 1):
                 try:
                     ddb_key = job["Src_bucket"] + "/" + job["Src_key"]
                     ddb_batch.put_item(Item={
@@ -231,7 +233,7 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
                     if retry >= MaxRetry:
                         logger.error(f'Fail writing to DDB: {ddb_key}')
                     else:
-                        time.sleep(5*retry)
+                        time.sleep(5 * retry)
 
             # construct sqs messages
             sqs_message.append({
@@ -242,7 +244,7 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
 
             # write to sqs in batch 10 or is last one
             if sqs_batch == 10 or job == job_list[-1]:
-                for retry in range(MaxRetry+1):
+                for retry in range(MaxRetry + 1):
                     try:
                         sqs.send_message_batch(QueueUrl=sqs_queue, Entries=sqs_message)
                         break
@@ -251,7 +253,7 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
                         if retry >= MaxRetry:
                             logger.error(f'Fail MaxRetry {MaxRetry} send sqs message: {str(sqs_message)}')
                         else:
-                            time.sleep(5*retry)
+                            time.sleep(5 * retry)
                 sqs_batch = 0
                 sqs_message = []
 
@@ -273,24 +275,29 @@ def split(Size, ChunkSize):
 
 
 # Get unfinished multipart upload id from s3
-def get_uploaded_list(s3_client, Des_bucket, Des_key):
+def get_uploaded_list(s3_client, Des_bucket, Des_key, MaxRetry):
     logger.info('Get unfinished multipart upload id list...')
     NextKeyMarker = ''
     IsTruncated = True
     __multipart_uploaded_list = []
     while IsTruncated:
-        try:
-            list_multipart_uploads = s3_client.list_multipart_uploads(
-                Bucket=Des_bucket,
-                Prefix=Des_key,
-                MaxUploads=1000,
-                KeyMarker=NextKeyMarker
-            )
-            # 这里的返回结果是List，文档上写是有排序的，稳妥起见还是在拼接了之后自己在check_file_exist里面排序
-        except Exception as e:
-            logger.error(f'Fail to list multipart upload {str(e)}')
-            # 获取失败就不重试了，不影响主流程，让后面去新建好了
-            return []
+        for retry in range(MaxRetry+1):
+            try:
+                list_multipart_uploads = s3_client.list_multipart_uploads(
+                    Bucket=Des_bucket,
+                    Prefix=Des_key,
+                    MaxUploads=1000,
+                    KeyMarker=NextKeyMarker
+                )
+                break
+                # 这里的返回结果是List，文档上写是有排序的，稳妥起见还是在拼接了之后自己在check_file_exist里面排序
+            except Exception as e:
+                logger.error(f'Fail to list multipart upload {str(e)}')
+                if retry >= MaxRetry:
+                    logger.error(f'Fail MaxRetry list multipart upload {str(e)}')
+                    return []
+                else:
+                    time.sleep(5*retry)
         IsTruncated = list_multipart_uploads["IsTruncated"]
         NextKeyMarker = list_multipart_uploads["NextKeyMarker"]
         if NextKeyMarker != '':
@@ -324,24 +331,29 @@ def check_file_exist(prefix_and_key, UploadIdList):
 
 
 # Check uploaded part number list on Des_bucket
-def checkPartnumberList(Des_bucket, Des_key, uploadId, s3_des_client):
+def checkPartnumberList(Des_bucket, Des_key, uploadId, s3_des_client, MaxRetry):
     try:
         partnumberList = []
         PartNumberMarker = 0
         IsTruncated = True
         while IsTruncated:
-            try:
-                response_uploadedList = s3_des_client.list_parts(
-                    Bucket=Des_bucket,
-                    Key=Des_key,
-                    UploadId=uploadId,
-                    MaxParts=1000,
-                    PartNumberMarker=PartNumberMarker
-                )
-            except Exception as e:
-                logger.error(f'Fail to list parts in checkPartnumberList. {str(e)}')
-                # 获取失败就不重试了，不影响主流程，让后面去新建好了
-                return []
+            for retry in range(MaxRetry+1):
+                try:
+                    response_uploadedList = s3_des_client.list_parts(
+                        Bucket=Des_bucket,
+                        Key=Des_key,
+                        UploadId=uploadId,
+                        MaxParts=1000,
+                        PartNumberMarker=PartNumberMarker
+                    )
+                    break
+                except Exception as e:
+                    logger.error(f'Fail to list parts in checkPartnumberList. {str(e)}')
+                    if retry >= MaxRetry:
+                        logger.error(f'Fail MaxRetry list parts in checkPartnumberList. {str(e)}')
+                        return []
+                    else:
+                        time.sleep(5*retry)
             NextPartNumberMarker = response_uploadedList['NextPartNumberMarker']
             IsTruncated = response_uploadedList['IsTruncated']
             if NextPartNumberMarker > 0:
@@ -499,7 +511,7 @@ def completeUpload(uploadId, Des_bucket, Des_key, len_indexList, s3_des_client, 
     PartNumberMarker = 0
     IsTruncated = True
     while IsTruncated:
-        for retryTime in range(MaxRetry+1):
+        for retryTime in range(MaxRetry + 1):
             try:
                 response_uploadedList = s3_des_client.list_parts(
                     Bucket=Des_bucket,
@@ -520,14 +532,14 @@ def completeUpload(uploadId, Des_bucket, Des_key, len_indexList, s3_des_client, 
                     logger.error(f'Fail MaxRetry list parts while completeUpload {Des_bucket}/{Des_key}')
                     return "ERR"
                 else:
-                    time.sleep(5*retryTime)
+                    time.sleep(5 * retryTime)
             except Exception as e:
                 logger.error(f'Fail to list parts while completeUpload {Des_bucket}/{Des_key}, {str(e)}')
                 if retryTime >= MaxRetry:
                     logger.error(f'Fail MaxRetry list parts while completeUpload {Des_bucket}/{Des_key}')
                     return "ERR"
                 else:
-                    time.sleep(5*retryTime)
+                    time.sleep(5 * retryTime)
 
         NextPartNumberMarker = response_uploadedList['NextPartNumberMarker']
         IsTruncated = response_uploadedList['IsTruncated']
@@ -550,7 +562,7 @@ def completeUpload(uploadId, Des_bucket, Des_key, len_indexList, s3_des_client, 
     completeStructJSON = {"Parts": uploadedListPartsClean}
 
     # S3合并multipart upload任务
-    for retryTime in range(MaxRetry+1):
+    for retryTime in range(MaxRetry + 1):
         try:
             logger.info(f'Try to merge multipart upload {Des_bucket}/{Des_key}')
             response_complete = s3_des_client.complete_multipart_upload(
@@ -567,7 +579,7 @@ def completeUpload(uploadId, Des_bucket, Des_key, len_indexList, s3_des_client, 
                 logger.error(f'Fail MaxRetry complete multipart upload {Des_bucket}/{Des_key}')
                 return "ERR"
             else:
-                time.sleep(5*retryTime)
+                time.sleep(5 * retryTime)
     logger.info(f'Complete merge file {Des_bucket}/{Des_key}')
     return result
 
@@ -599,173 +611,15 @@ def job_looper(sqs, sqs_queue, table, s3_src_client, s3_des_client, instance_id,
             else:
                 job = json.loads(sqs_job["Messages"][0]["Body"])
                 job_receipt = sqs_job["Messages"][0]["ReceiptHandle"]  # 用于后面删除message
-
-                Src_bucket = job['Src_bucket']
-                Src_key = job['Src_key']
-                Size = job['Size']
-                Des_bucket = job['Des_bucket']
-                Des_key = job['Des_key']
-                logger.info(f'Start: {Src_bucket}/{Src_key}, Size: {Size}')
-
-                # DynamoDB log: ADD retry time, instance-id list, SET startTime
-                for retry in range(MaxRetry+1):
-                    try:
-                        logger.info(f'Write log to DDB via start job: {Src_bucket}/{Src_key}')
-                        table.update_item(
-                            Key={
-                                "Key": Src_bucket + "/" + Src_key
-                            },
-                            UpdateExpression="ADD instance_id :id, retry_times :t "
-                                             "SET start_time = :s",
-                            ExpressionAttributeValues={
-                                ":t": 1,
-                                ":id": {instance_id},
-                                ":s": int(time.time())
-                            }
-                        )
-                        break
-                    except Exception as e:
-                        # 日志写不了
-                        logger.error(f'Fail to put log to DDB at start {Src_bucket}/{Src_key}, {str(e)}')
-                        if retry >= MaxRetry:
-                            logger.error(f'Fail MaxRetry put log to DDB at start {Src_bucket}/{Src_key}')
-                        else:
-                            time.sleep(5*retry)
-
-                # Size lower than limit, not to check s3 exist parts, to save time
-                multipart_uploaded_list = []
-                if Size > ResumableThreshold:
-                    # Get dest s3 unfinish multipart upload of this file
-                    multipart_uploaded_list = get_uploaded_list(s3_des_client, Des_bucket, Des_key)
-
-                # Debug用，清理S3上现有未完成的Multipart Upload ID（不只是当前Job，而对应目标Bucket上所有的）
-                if multipart_uploaded_list and CleanUnfinishedUpload:
-                    logger.warning(f'You set CleanUnfinishedUpload. There are {len(multipart_uploaded_list)}.'
-                                   f' Now clean them and restart!')
-                    multipart_uploaded_list = get_uploaded_list(s3_des_client, Des_bucket, "")
-                    for clean_i in multipart_uploaded_list:
-                        try:
-                            s3_des_client.abort_multipart_upload(
-                                Bucket=Des_bucket,
-                                Key=clean_i["Key"],
-                                UploadId=clean_i["UploadId"]
-                            )
-                        except Exception as e:
-                            logger.error(f'Fail to clean {str(e)}')
-                    multipart_uploaded_list = []
-                    logger.info('CLEAN FINISHED')
-
-                # 开始 Job
-                # 循环重试3次（如果MD5计算的ETag不一致）
-                for md5_retry in range(3):
-                    # Job 准备
-                    # 检查文件没Multipart UploadID要新建, 有则 return UploadID
-                    response_check_upload = check_file_exist(
-                        Des_key,
-                        multipart_uploaded_list
-                    )
-                    if response_check_upload == 'UPLOAD':
-                        logger.info(f'Create multipart upload {Des_bucket}/{Des_key}')
-                        try:
-                            response_new_upload = s3_des_client.create_multipart_upload(
-                                Bucket=Des_bucket,
-                                Key=Des_key,
-                                StorageClass=StorageClass
-                            )
-                        except Exception as e:
-                            logger.error(f'Fail to create new multipart upload. {str(e)}')
-                            if md5_retry >= 2:
-                                upload_etag_full = "ERR"
-                                break
-                            else:
-                                time.sleep(5*md5_retry)
-                                continue
-                        # logger.info("UploadId: "+response_new_upload["UploadId"])
-                        reponse_uploadId = response_new_upload["UploadId"]
-                        partnumberList = []
-                    else:
-                        reponse_uploadId = response_check_upload
-                        logger.info(f'Resume upload id: {Des_bucket}/{Des_key}')
-                        # 获取已上传partnumberList
-                        partnumberList = checkPartnumberList(
-                            Des_bucket,
-                            Des_key,
-                            reponse_uploadId,
-                            s3_des_client
-                        )
-
-                    # 获取文件拆分片索引列表，例如[0, 10, 20]
-                    indexList, ChunkSize_auto = split(
-                        Size,
-                        ChunkSize
-                    )  # 对于大于10000分片的大文件，自动调整为Chunksize_auto
-
-                    # Job Thread: uploadPart, 加入超时机制之后返回 "TIMEOUT"
-                    upload_etag_full = job_processor(
-                        reponse_uploadId,
-                        indexList,
-                        partnumberList,
-                        job,
-                        s3_src_client,
-                        s3_des_client,
-                        MaxThread,
-                        ChunkSize_auto,  # 对单个文件使用自动调整的 Chunksize_auto
-                        MaxRetry,
-                        JobTimeout,
-                        ifVerifyMD5Twice
-                    )
-                    if upload_etag_full == "TIMEOUT":
-                        break  # 超时退出处理该Job，因为sqs超时会被其他EC2拿到
-
-                    # 合并S3上的文件
-                    complete_etag = completeUpload(reponse_uploadId, Des_bucket, Des_key,
-                                                   len(indexList), s3_des_client, MaxRetry)
-                    logger.info(f'FINISH: {Des_bucket}/{Des_key}')
-                    if complete_etag == "ERR":
-                        multipart_uploaded_list = []  # 清掉已上传id列表，以便重新上传
-                        continue  # 循环重试
-
-                    # 检查文件MD5
-                    if ifVerifyMD5Twice:
-                        if complete_etag == upload_etag_full:
-                            logger.info(f'MD5 ETag Matched - {Des_bucket}/{Des_key} - {complete_etag}')
-                            break  # 结束本文件，下一个sqs job
-                        else:  # ETag 不匹配，删除目的S3的文件，重试
-                            logger.warning(f'MD5 ETag NOT MATCHED {Des_bucket}/{Des_key}( Destination / Origin ): '
-                                           f'{complete_etag} - {upload_etag_full}')
-                            try:
-                                s3_des_client.delete_object(
-                                    Bucket=Des_bucket,
-                                    Key=Des_key
-                                )
-                            except Exception as e:
-                                logger.error(f'Fail to delete on S3. {str(e)}')
-                            multipart_uploaded_list = []
-                            if md5_retry >= 2:
-                                logger.error(f'MD5 ETag NOT MATCHED Exceed Max Retries - {Des_bucket}/{Des_key}')
-                                upload_etag_full = "ERR"
-                            else:
-                                logger.warning(f'Deleted and retry {Des_bucket}/{Des_key}')
-
-                # 结束 Job
-                # Delete this file's related unfinished multipart upload, 可能有多个残留
-                for clean_i in multipart_uploaded_list:
-                    # 其实list只查了当前Key的，不过为了安全确保其他code没被改，所以判断一下Key一致性
-                    if clean_i["Key"] == Des_key:
-                        try:
-                            s3_des_client.abort_multipart_upload(
-                                Bucket=Des_bucket,
-                                Key=Des_key,
-                                UploadId=clean_i["UploadId"]
-                            )
-                        except Exception as e:
-                            logger.error(f'Fail to clean old unfinished multipart upload {str(e)}'
-                                         f'{Des_bucket}/{Des_key} - UploadID: {clean_i["UploadId"]}')
-
+                ########
+                upload_etag_full = step_function(job, table, s3_src_client, s3_des_client, instance_id,
+                                                 StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
+                                                 JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload)
+                ########
                 # Del Job on sqs
                 if upload_etag_full != "TIMEOUT" and upload_etag_full != "ERR":
                     # 如果是超时或ERR的就不删SQS消息，是正常结束就删
-                    for retry in range(MaxRetry+1):
+                    for retry in range(MaxRetry + 1):
                         try:
                             logger.info(f'Try to finsh job message on sqs.')
                             sqs.delete_message(
@@ -778,34 +632,210 @@ def job_looper(sqs, sqs_queue, table, s3_src_client, s3_des_client, instance_id,
                             if retry >= MaxRetry:
                                 logger.error(f'Fail MaxRetry delete sqs message: {Des_bucket}/{Des_key}, {str(e)}')
                             else:
-                                time.sleep(5*retry)
+                                time.sleep(5 * retry)
 
-                # DynamoDB log: ADD status: DONE/ERR(upload_etag_full)
-                status = "DONE"
-                if upload_etag_full == "TIMEOUT":
-                    status = "TIMEOUT"
-                elif upload_etag_full == "ERR":
-                    status = "ERR"
-                for retry in range(MaxRetry+1):
-                    try:
-                        table.update_item(
-                            Key={
-                                "Key": Src_bucket + "/" + Src_key
-                            },
-                            UpdateExpression="SET spent_time=:s-start_time ADD job_status :done",
-                            ExpressionAttributeValues={
-                                ":done": {status},
-                                ":s": int(time.time())
-                            }
-                        )
-                        break
-                    except Exception as e:
-                        logger.error(f'Fail to put log to DDB at end. {str(e)}')
-                        if retry >= MaxRetry:
-                            logger.error(f'Fail MaxRetry to put log to DDB at end. {str(e)}')
-                        else:
-                            time.sleep(5*retry)
         except Exception as e:
             logger.error(f'Fail. Wait for 5 seconds. ERR: {str(e)}')
             time.sleep(5)
         # Finish Job, go back to get next job in queue
+
+
+def step_function(job, table, s3_src_client, s3_des_client, instance_id,
+                  StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
+                  JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload):
+    # 正常开始处理
+    Src_bucket = job['Src_bucket']
+    Src_key = job['Src_key']
+    Size = job['Size']
+    Des_bucket = job['Des_bucket']
+    Des_key = job['Des_key']
+    logger.info(f'Start: {Src_bucket}/{Src_key}, Size: {Size}')
+
+    # DynamoDB log: ADD retry time, instance-id list, SET startTime
+    for retry in range(MaxRetry + 1):
+        try:
+            logger.info(f'Write log to DDB via start job: {Src_bucket}/{Src_key}')
+            table.update_item(
+                Key={
+                    "Key": Src_bucket + "/" + Src_key
+                },
+                UpdateExpression="ADD instance_id :id, retry_times :t "
+                                 "SET start_time = :s",
+                ExpressionAttributeValues={
+                    ":t": 1,
+                    ":id": {instance_id},
+                    ":s": int(time.time())
+                }
+            )
+            break
+        except Exception as e:
+            # 日志写不了
+            logger.error(f'Fail to put log to DDB at start {Src_bucket}/{Src_key}, {str(e)}')
+            if retry >= MaxRetry:
+                logger.error(f'Fail MaxRetry put log to DDB at start {Src_bucket}/{Src_key}')
+            else:
+                time.sleep(5 * retry)
+
+    # Size lower than limit, not to check s3 exist parts, to save time
+    multipart_uploaded_list = []
+    if Size > ResumableThreshold:
+        # Get dest s3 unfinish multipart upload of this file
+        multipart_uploaded_list = get_uploaded_list(s3_des_client, Des_bucket, Des_key, MaxRetry)
+
+    # Debug用，清理S3上现有未完成的Multipart Upload ID（不只是当前Job，而对应目标Bucket上所有的）
+    if multipart_uploaded_list and CleanUnfinishedUpload:
+        logger.warning(f'You set CleanUnfinishedUpload. There are {len(multipart_uploaded_list)}.'
+                       f' Now clean them and restart!')
+        multipart_uploaded_list = get_uploaded_list(s3_des_client, Des_bucket, "", MaxRetry)
+        for clean_i in multipart_uploaded_list:
+            try:
+                s3_des_client.abort_multipart_upload(
+                    Bucket=Des_bucket,
+                    Key=clean_i["Key"],
+                    UploadId=clean_i["UploadId"]
+                )
+            except Exception as e:
+                logger.error(f'Fail to clean {str(e)}')
+        multipart_uploaded_list = []
+        logger.info('CLEAN FINISHED')
+
+    # 开始 Job 步骤
+    # 循环重试3次（如果MD5计算的ETag不一致）
+    for md5_retry in range(3):
+        # Job 准备
+        # 检查文件没Multipart UploadID要新建, 有则 return UploadID
+        response_check_upload = check_file_exist(
+            Des_key,
+            multipart_uploaded_list
+        )
+        if response_check_upload == 'UPLOAD':
+            logger.info(f'Create multipart upload {Des_bucket}/{Des_key}')
+            try:
+                response_new_upload = s3_des_client.create_multipart_upload(
+                    Bucket=Des_bucket,
+                    Key=Des_key,
+                    StorageClass=StorageClass
+                )
+            except Exception as e:
+                logger.error(f'Fail to create new multipart upload. {str(e)}')
+                if md5_retry >= 2:
+                    upload_etag_full = "ERR"
+                    break
+                else:
+                    time.sleep(5 * md5_retry)
+                    continue
+            # logger.info("UploadId: "+response_new_upload["UploadId"])
+            reponse_uploadId = response_new_upload["UploadId"]
+            partnumberList = []
+        else:
+            reponse_uploadId = response_check_upload
+            logger.info(f'Resume upload id: {Des_bucket}/{Des_key}')
+            # 获取已上传partnumberList
+            partnumberList = checkPartnumberList(
+                Des_bucket,
+                Des_key,
+                reponse_uploadId,
+                s3_des_client,
+                MaxRetry
+            )
+
+        # 获取文件拆分片索引列表，例如[0, 10, 20]
+        indexList, ChunkSize_auto = split(
+            Size,
+            ChunkSize
+        )  # 对于大于10000分片的大文件，自动调整为Chunksize_auto
+
+        # Job Thread: uploadPart, 加入超时机制之后返回 "TIMEOUT"
+        upload_etag_full = job_processor(
+            reponse_uploadId,
+            indexList,
+            partnumberList,
+            job,
+            s3_src_client,
+            s3_des_client,
+            MaxThread,
+            ChunkSize_auto,  # 对单个文件使用自动调整的 Chunksize_auto
+            MaxRetry,
+            JobTimeout,
+            ifVerifyMD5Twice
+        )
+        if upload_etag_full == "TIMEOUT":
+            break  # 超时退出处理该Job，因为sqs超时会被其他worker拿到
+        elif upload_etag_full == "ERR":
+            multipart_uploaded_list = []  # 清掉已上传id列表，以便重新上传
+            continue  # 循环重试
+
+        # 合并S3上的文件
+        complete_etag = completeUpload(reponse_uploadId, Des_bucket, Des_key,
+                                       len(indexList), s3_des_client, MaxRetry)
+        logger.info(f'Merged: {Des_bucket}/{Des_key}')
+        if complete_etag == "ERR":
+            multipart_uploaded_list = []  # 清掉已上传id列表，以便重新上传
+            continue  # 循环重试
+
+        # 检查文件MD5
+        if ifVerifyMD5Twice:
+            if complete_etag == upload_etag_full:
+                logger.info(f'MD5 ETag Matched - {Des_bucket}/{Des_key} - {complete_etag}')
+                break  # 结束本文件，下一个sqs job
+            else:  # ETag 不匹配，删除目的S3的文件，重试
+                logger.warning(f'MD5 ETag NOT MATCHED {Des_bucket}/{Des_key}( Destination / Origin ): '
+                               f'{complete_etag} - {upload_etag_full}')
+                try:
+                    s3_des_client.delete_object(
+                        Bucket=Des_bucket,
+                        Key=Des_key
+                    )
+                except Exception as e:
+                    logger.error(f'Fail to delete on S3. {str(e)}')
+                multipart_uploaded_list = []
+                if md5_retry >= 2:
+                    logger.error(f'MD5 ETag NOT MATCHED Exceed Max Retries - {Des_bucket}/{Des_key}')
+                    upload_etag_full = "ERR"
+                else:
+                    logger.warning(f'Retry {Des_bucket}/{Des_key}')
+                    continue
+        # 结束 Job
+        break
+
+    # DynamoDB log: ADD status: DONE/ERR(upload_etag_full)
+    status = "DONE"
+    if upload_etag_full == "TIMEOUT":
+        status = "TIMEOUT"
+    elif upload_etag_full == "ERR":
+        status = "ERR"
+    for retry in range(MaxRetry + 1):
+        try:
+            table.update_item(
+                Key={
+                    "Key": Src_bucket + "/" + Src_key
+                },
+                UpdateExpression="SET spent_time=:s-start_time ADD job_status :done",
+                ExpressionAttributeValues={
+                    ":done": {status},
+                    ":s": int(time.time())
+                }
+            )
+            break
+        except Exception as e:
+            logger.error(f'Fail to put log to DDB at end. {str(e)}')
+            if retry >= MaxRetry:
+                logger.error(f'Fail MaxRetry to put log to DDB at end. {str(e)}')
+            else:
+                time.sleep(5 * retry)
+
+    # Delete this file's related unfinished multipart upload, 可能有多个残留
+    for clean_i in multipart_uploaded_list:
+        # 其实list只查了当前Key的，不过为了安全确保其他code没被改，所以判断一下Key一致性
+        if clean_i["Key"] == Des_key:
+            try:
+                s3_des_client.abort_multipart_upload(
+                    Bucket=Des_bucket,
+                    Key=Des_key,
+                    UploadId=clean_i["UploadId"]
+                )
+            except Exception as e:
+                logger.error(f'Fail to clean old unfinished multipart upload {str(e)}'
+                             f'{Des_bucket}/{Des_key} - UploadID: {clean_i["UploadId"]}')
+
+    return upload_etag_full
