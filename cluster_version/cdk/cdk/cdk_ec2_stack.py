@@ -3,7 +3,7 @@ import aws_cdk.aws_ec2 as ec2
 import aws_cdk.aws_autoscaling as autoscaling
 import aws_cdk.aws_iam as iam
 
-worker_type = "c5.xlarge"
+worker_type = "c5.large"
 
 linux_ami = ec2.AmazonLinuxImage(generation=ec2.AmazonLinuxGeneration.AMAZON_LINUX_2,
                                  edition=ec2.AmazonLinuxEdition.STANDARD,
@@ -19,7 +19,7 @@ with open("./cdk/user_data_master.sh") as f:
 class CdkEc2Stack(core.Stack):
 
     def __init__(self, scope: core.Construct, _id: str, vpc, key_name, ddb_file_list, sqs_queue,
-                 sqs_queue_DLQ, ssm_bucket_para, ssm_credential_para, ssm_bucket_status, **kwargs) -> None:
+                 sqs_queue_DLQ, ssm_bucket_para, ssm_credential_para, **kwargs) -> None:
         super().__init__(scope, _id, **kwargs)
 
         # Create master node
@@ -32,7 +32,7 @@ class CdkEc2Stack(core.Stack):
                               user_data=ec2.UserData.custom(user_data_master),
                               vpc=vpc,
                               vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC))
-        master.connections.allow_from_any_ipv4(ec2.Port.tcp(22), "Internet access SSH")
+        # master.connections.allow_from_any_ipv4(ec2.Port.tcp(22), "Internet access SSH")
         master.role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSSMManagedInstanceCore"))
         master.role.add_managed_policy(
@@ -56,7 +56,7 @@ class CdkEc2Stack(core.Stack):
                                                   cooldown=core.Duration.minutes(20),
                                                   spot_price="0.5"
                                                   )
-        worker_asg.connections.allow_from_any_ipv4(ec2.Port.tcp(22), "Internet access SSH")
+        # worker_asg.connections.allow_from_any_ipv4(ec2.Port.tcp(22), "Internet access SSH")
         worker_asg.role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSSMManagedInstanceCore"))
         worker_asg.role.add_managed_policy(
@@ -67,7 +67,7 @@ class CdkEc2Stack(core.Stack):
         ddb_file_list.grant_full_access(master)
         ddb_file_list.grant_full_access(worker_asg)
 
-        sqs_queue.grant_send_messages(master)
+        sqs_queue.grant_consume_messages(master)
         sqs_queue.grant_consume_messages(worker_asg)
         sqs_queue_DLQ.grant_consume_messages(master)
         sqs_queue_DLQ.grant_consume_messages(worker_asg)

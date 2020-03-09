@@ -16,5 +16,5 @@ modprobe tcp_bbr
 modprobe sch_fq
 sysctl -w net.ipv4.tcp_congestion_control=bbr
 
-python3 amazon-s3-resumable-upload/cluster_version/s3_upload_cluster_master.py
-# log exported to ~/log/
+cd amazon-s3-resumable-upload/cluster_version/
+python3 s3_migration_cluster_master.py
