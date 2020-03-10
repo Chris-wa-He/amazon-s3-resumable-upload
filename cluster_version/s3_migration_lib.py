@@ -15,7 +15,6 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
 
 # Configure logging
@@ -466,6 +465,7 @@ def job_processor(uploadId, indexList, partnumberList, job, s3_src_client, s3_de
             return "TIMEOUT"
         return "Complete"
 
+    # job_processor Main
     partnumber = 1  # 当前循环要上传的Partnumber
     total = len(indexList)
     md5list = [hashlib.md5(b'')] * total
@@ -825,17 +825,18 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
                 time.sleep(5 * retry)
 
     # Delete this file's related unfinished multipart upload, 可能有多个残留
-    for clean_i in multipart_uploaded_list:
-        # 其实list只查了当前Key的，不过为了安全确保其他code没被改，所以判断一下Key一致性
-        if clean_i["Key"] == Des_key:
-            try:
-                s3_des_client.abort_multipart_upload(
-                    Bucket=Des_bucket,
-                    Key=Des_key,
-                    UploadId=clean_i["UploadId"]
-                )
-            except Exception as e:
-                logger.error(f'Fail to clean old unfinished multipart upload {str(e)}'
-                             f'{Des_bucket}/{Des_key} - UploadID: {clean_i["UploadId"]}')
+    # 不在这里清了，让S3的生命周期策略去清3天过期的 unfinished multipart upload
+    # for clean_i in multipart_uploaded_list:
+    #     # 其实list只查了当前Key的，不过为了安全确保其他code没被改，所以判断一下Key一致性
+    #     if clean_i["Key"] == Des_key:
+    #         try:
+    #             s3_des_client.abort_multipart_upload(
+    #                 Bucket=Des_bucket,
+    #                 Key=Des_key,
+    #                 UploadId=clean_i["UploadId"]
+    #             )
+    #         except Exception as e:
+    #             logger.error(f'Fail to clean old unfinished multipart upload {str(e)}'
+    #                          f'{Des_bucket}/{Des_key} - UploadID: {clean_i["UploadId"]}')
 
     return upload_etag_full
