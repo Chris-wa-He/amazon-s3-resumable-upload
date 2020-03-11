@@ -27,6 +27,14 @@ try:
     LoggingLevel = cfg.get('Debug', 'LoggingLevel')
     CleanUnfinishedUpload = cfg.getboolean('Debug', 'CleanUnfinishedUpload')
     LocalProfileMode = cfg.getboolean('Debug', 'LocalProfileMode')
+    try:
+        Des_bucket_default = cfg.get('Basic', 'Des_bucket_default')
+    except Exception as e:
+        Des_bucket_default = 'foo'
+    try:
+        Des_prefix_default = cfg.get('Basic', 'Des_prefix_default')
+    except Exception as e:
+        Des_prefix_default = ''
 except Exception as e:
     print("ERR loading s3_migration_cluster_config.ini", str(e))
     sys.exit(0)
@@ -53,7 +61,8 @@ if __name__ == '__main__':
             job_pool.submit(job_looper,
                             sqs, sqs_queue, table, s3_src_client, s3_des_client, instance_id,
                             StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
-                            JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload
+                            JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload,
+                            Des_bucket_default, Des_prefix_default
                             )
 
     spent_time = int(time.time() - start_time)

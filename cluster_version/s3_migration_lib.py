@@ -83,7 +83,7 @@ def set_env(JobType, LocalProfileMode, table_queue_name, ssm_parameter_credentia
             sys.exit(0)
     # 在没有Role的环境运行，例如本地Mac测试
     else:
-        instance_id = "no_instance_id"
+        instance_id = "local"
         src_session = boto3.session.Session(profile_name='iad')
         des_session = boto3.session.Session(profile_name='zhy')
         sqs = src_session.client('sqs')
@@ -587,15 +587,16 @@ def completeUpload(uploadId, Des_bucket, Des_key, len_indexList, s3_des_client, 
 # Continuely get job message to invoke one processor per job
 def job_looper(sqs, sqs_queue, table, s3_src_client, s3_des_client, instance_id,
                StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
-               JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload):
+               JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload,
+               Des_bucket_default, Des_prefix_default):
     while True:
         # Get Job from sqs
         try:
             # TODO: 一次拿一批，如果是大量小文件就比较快
             logger.info('Get Job from sqs queue...')
-            sqs_job = sqs.receive_message(QueueUrl=sqs_queue)
+            sqs_job_get = sqs.receive_message(QueueUrl=sqs_queue)
             # Empty queue message available
-            if "Messages" not in sqs_job:
+            if "Messages" not in sqs_job_get:  # No message on sqs queue
                 # 检查是否还有其他在in-flight中的，sleep, 循环等待
                 logger.info('No message in queue available, wait for inFlight message...')
                 sqs_in_flight = sqs.get_queue_attributes(
@@ -607,32 +608,61 @@ def job_looper(sqs, sqs_queue, table, s3_src_client, s3_des_client, instance_id,
                     # TODO: Empty queue, send sns notification, or use CloudWatch Alarm
                     pass
                 time.sleep(60)
+
             # 拿到 Job message
             else:
-                job = json.loads(sqs_job["Messages"][0]["Body"])
-                job_receipt = sqs_job["Messages"][0]["ReceiptHandle"]  # 用于后面删除message
-                ########
-                upload_etag_full = step_function(job, table, s3_src_client, s3_des_client, instance_id,
-                                                 StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
-                                                 JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload)
-                ########
-                # Del Job on sqs
-                if upload_etag_full != "TIMEOUT" and upload_etag_full != "ERR":
-                    # 如果是超时或ERR的就不删SQS消息，是正常结束就删
-                    for retry in range(MaxRetry + 1):
-                        try:
-                            logger.info(f'Try to finsh job message on sqs.')
-                            sqs.delete_message(
-                                QueueUrl=sqs_queue,
-                                ReceiptHandle=job_receipt
-                            )
-                            break
-                        except Exception as e:
-                            logger.error(f'Fail to delete sqs message: {Des_bucket}/{Des_key}, {str(e)}')
-                            if retry >= MaxRetry:
-                                logger.error(f'Fail MaxRetry delete sqs message: {Des_bucket}/{Des_key}, {str(e)}')
-                            else:
-                                time.sleep(5 * retry)
+                for sqs_job in sqs_job_get["Messages"]:
+                    job = json.loads(sqs_job["Body"])
+                    job_receipt = sqs_job["ReceiptHandle"]  # 用于后面删除message
+
+                    # 判断是S3来的消息，而不是jodsender来的就转换一下
+                    if 'Records' in job:  # S3来的消息带着'Records'
+                        for One_record in job['Records']:
+                            if 's3' in One_record:
+                                Src_bucket = One_record['s3']['bucket']['name']
+                                Src_key = One_record['s3']['object']['key']
+                                Src_key = urllib.parse.unquote_plus(Src_key)
+                                Size = One_record['s3']['object']['size']
+                                if Size == 0:
+                                    return {
+                                        'statusCode': 200,
+                                        'body': "Zero size file"
+                                    }
+                                Des_bucket, Des_prefix = Des_bucket_default, Des_prefix_default
+                                job = {
+                                    'Src_bucket': Src_bucket,
+                                    'Src_key': Src_key,
+                                    'Size': Size,
+                                    'Des_bucket': Des_bucket,
+                                    'Des_key': str(PurePosixPath(Des_prefix) / Src_key)
+                                }
+                    if 'Des_bucket' not in job:
+                        logger.warning(f'Wrong sqs job: {json.dumps(job, default=str)}')
+                        logger.warning('Try to handle next message')
+                        time.sleep(1)
+                        continue
+                    ######## 主流程
+                    upload_etag_full = step_function(job, table, s3_src_client, s3_des_client, instance_id,
+                                                     StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
+                                                     JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload)
+                    ########
+                    # Del Job on sqs
+                    if upload_etag_full != "TIMEOUT" and upload_etag_full != "ERR":
+                        # 如果是超时或ERR的就不删SQS消息，是正常结束就删
+                        for retry in range(MaxRetry + 1):
+                            try:
+                                logger.info(f'Try to finsh job message on sqs.')
+                                sqs.delete_message(
+                                    QueueUrl=sqs_queue,
+                                    ReceiptHandle=job_receipt
+                                )
+                                break
+                            except Exception as e:
+                                logger.error(f'Fail to delete sqs message: {Des_bucket}/{Des_key}, {str(e)}')
+                                if retry >= MaxRetry:
+                                    logger.error(f'Fail MaxRetry delete sqs message: {Des_bucket}/{Des_key}, {str(e)}')
+                                else:
+                                    time.sleep(5 * retry)
 
         except Exception as e:
             logger.error(f'Fail. Wait for 5 seconds. ERR: {str(e)}')

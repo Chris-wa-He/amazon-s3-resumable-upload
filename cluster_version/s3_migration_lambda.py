@@ -5,8 +5,8 @@ from botocore.config import Config
 from pathlib import PurePosixPath
 
 # 常量
-Des_bucket = os.environ['Des_bucket']
-Des_prefix = os.environ['Des_prefix']
+Des_bucket_default = os.environ['Des_bucket_default']
+Des_prefix_default = os.environ['Des_prefix_default']
 aws_access_key_id = os.environ['aws_access_key_id']
 aws_secret_access_key = os.environ['aws_secret_access_key']
 
@@ -19,7 +19,7 @@ ifVerifyMD5Twice = False
 ChunkSize = 5 * 1024 * 1024
 ResumableThreshold = 10
 MaxRetry = 10
-MaxThread = 200
+MaxThread = 50
 MaxParallelFile = 1
 JobTimeout = 3000
 
@@ -30,7 +30,7 @@ LocalProfileMode = False
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-s3_config = Config(max_pool_connections=200)  # boto default 10
+s3_config = Config(max_pool_connections=50)  # boto default 10
 
 region = os.environ['Des_region']
 instance_id = "Lambda"
@@ -58,69 +58,79 @@ class TimeoutOrMaxRetry(Exception):
 
 
 def lambda_handler(event, context):
-    print(json.dumps(event, default=str))
+    context = ssl._create_unverified_context()
+    response = urllib.request.urlopen(urllib.request.Request("https://checkip.amazonaws.com"), context=context).read()
+    print("Lambda IP Address:", response.decode('utf-8'))
+
+    logger.info(json.dumps(event, default=str))
 
     trigger_body = event['Records'][0]['body']
-    sqs_message = json.loads(trigger_body)
-    print(json.dumps(sqs_message, default=str))
+    job = json.loads(trigger_body)
+    logger.info(json.dumps(job, default=str))
 
-    if "Records" in sqs_message:
-        Src_bucket = sqs_message['Records'][0]['s3']['bucket']['name']
-        Src_key = sqs_message['Records'][0]['s3']['object']['key']
-        Src_key = urllib.parse.unquote_plus(Src_key)
-        Size = sqs_message['Records'][0]['s3']['object']['size']
-        if Size == 0:
-            return {
+    # 判断是S3来的消息，而不是jodsender来的就转换一下
+    if 'Records' in job:  # S3来的消息带着'Records'
+        for One_record in job['Records']:
+            if 's3' in One_record:
+                Src_bucket = One_record['s3']['bucket']['name']
+                Src_key = One_record['s3']['object']['key']
+                Src_key = urllib.parse.unquote_plus(Src_key)
+                Size = One_record['s3']['object']['size']
+                if Size == 0:
+                    return {
+                        'statusCode': 200,
+                        'body': "Zero size file"
+                    }
+                Des_bucket, Des_prefix = Des_bucket_default, Des_prefix_default
+                job = {
+                    'Src_bucket': Src_bucket,
+                    'Src_key': Src_key,
+                    'Size': Size,
+                    'Des_bucket': Des_bucket,
+                    'Des_key': str(PurePosixPath(Des_prefix) / Src_key)
+                }
+    if 'Des_bucket' not in job:
+        logger.warning(f'Wrong sqs job: {json.dumps(job, default=str)}')
+        logger.warning('Try to handle next message')
+        return {
                 'statusCode': 200,
-                'body': "Zero size file"
+                'body': "Wrong sqs job return"
             }
 
-        job = {
-            'Src_bucket': Src_bucket,
-            'Src_key': Src_key,
-            'Size': Size,
-            'Des_bucket': Des_bucket,
-            'Des_key': str(PurePosixPath(Des_prefix) / Src_key)
-        }
+    logger.info(f'Write log to DDB in first round of job: {job["Src_bucket"]} / {job["Src_key"]}')
+    with table.batch_writer() as ddb_batch:
+        # write to ddb, auto batch
+        for retry in range(MaxRetry + 1):
+            try:
+                ddb_key = str(PurePosixPath(job["Src_bucket"]) / job["Src_key"])
+                ddb_batch.put_item(Item={
+                    "Key": ddb_key,
+                    "Src_bucket": job["Src_bucket"],
+                    "Des_bucket": job["Des_bucket"],
+                    "Des_key": job["Des_key"],
+                    "Size": job["Size"]
+                })
+                break
+            except Exception as e:
+                logger.error(f'Fail writing to DDB: {ddb_key}, {str(e)}')
+                if retry >= MaxRetry:
+                    logger.error(f'Fail writing to DDB: {ddb_key}')
+                else:
+                    time.sleep(5 * retry)
 
-        context = ssl._create_unverified_context()
-        response = urllib.request.urlopen(urllib.request.Request("https://checkip.amazonaws.com"), context=context).read()
-        print("Lambda IP Address:", response.decode('utf-8'))
+    upload_etag_full = step_function(job, table, s3_src_client, s3_des_client, instance_id,
+                                     StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
+                                     JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload)
 
-        logger.info(f'Write log to DDB in first round of job: {Src_bucket}/{Src_key}')
-        with table.batch_writer() as ddb_batch:
-            # write to ddb, auto batch
-            for retry in range(MaxRetry + 1):
-                try:
-                    ddb_key = str(PurePosixPath(job["Src_bucket"]) / job["Src_key"])
-                    ddb_batch.put_item(Item={
-                        "Key": ddb_key,
-                        "Src_bucket": job["Src_bucket"],
-                        "Des_bucket": job["Des_bucket"],
-                        "Des_key": job["Des_key"],
-                        "Size": job["Size"]
-                    })
-                    break
-                except Exception as e:
-                    logger.error(f'Fail writing to DDB: {ddb_key}, {str(e)}')
-                    if retry >= MaxRetry:
-                        logger.error(f'Fail writing to DDB: {ddb_key}')
-                    else:
-                        time.sleep(5 * retry)
-
-        upload_etag_full = step_function(job, table, s3_src_client, s3_des_client, instance_id,
-                                         StorageClass, ChunkSize, MaxRetry, MaxThread, ResumableThreshold,
-                                         JobTimeout, ifVerifyMD5Twice, CleanUnfinishedUpload)
-
-        if upload_etag_full != "TIMEOUT" and upload_etag_full != "ERR":
-            return {
-                'statusCode': 200,
-                'body': upload_etag_full
-            }
-        else:
-            raise TimeoutOrMaxRetry
-    else:
+    if upload_etag_full != "TIMEOUT" and upload_etag_full != "ERR":
         return {
             'statusCode': 200,
-            'body': "OK"
+            'body': upload_etag_full
         }
+    else:
+        raise TimeoutOrMaxRetry
+
+
+
+if __name__ == '__main__':
+    pass
