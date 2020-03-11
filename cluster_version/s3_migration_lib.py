@@ -9,7 +9,7 @@ import threading
 import base64
 import sys
 
-import requests
+import urllib.request
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -52,15 +52,15 @@ def set_log(LoggingLevel):
 
 # Set environment
 def set_env(JobType, LocalProfileMode, table_queue_name, ssm_parameter_credentials):
-    s3_config = Config(max_pool_connections=25)  # boto default 10
+    s3_config = Config(max_pool_connections=100)  # boto default 10
 
     if os.uname()[0] == 'Linux' and not LocalProfileMode:  # on EC2, use EC2 role
-        region = json.loads(requests.get(
-            'http://169.254.169.254/latest/dynamic/instance-identity/document').text)['region']
-        instance_id = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
-        sqs = boto3.client('sqs', region)
-        dynamodb = boto3.resource('dynamodb', region)
-        ssm = boto3.client('ssm', region)
+        instance_id = urllib.request.urlopen(urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/instance-id"
+        )).read().decode('utf-8')
+        sqs = boto3.client('sqs')
+        dynamodb = boto3.resource('dynamodb')
+        ssm = boto3.client('ssm')
 
         # 取另一个Account的credentials
         credentials = json.loads(ssm.get_parameter(
@@ -73,10 +73,10 @@ def set_env(JobType, LocalProfileMode, table_queue_name, ssm_parameter_credentia
             region_name=credentials["region"]
         )
         if JobType.upper() == "PUT":
-            s3_src_client = boto3.client('s3', region, config=s3_config)
+            s3_src_client = boto3.client('s3', config=s3_config)
             s3_des_client = credentials_session.client('s3', config=s3_config)
         elif JobType.upper() == "GET":
-            s3_des_client = boto3.client('s3', region, config=s3_config)
+            s3_des_client = boto3.client('s3', config=s3_config)
             s3_src_client = credentials_session.client('s3', config=s3_config)
         else:
             logger.error('Wrong JobType setting in config.ini file')
@@ -218,7 +218,7 @@ def job_upload_sqs_ddb(sqs, sqs_queue, table, job_list, MaxRetry=30):
             # write to ddb, auto batch
             for retry in range(MaxRetry + 1):
                 try:
-                    ddb_key = job["Src_bucket"] + "/" + job["Src_key"]
+                    ddb_key = str(PurePosixPath(job["Src_bucket"]) / job["Src_key"])
                     ddb_batch.put_item(Item={
                         "Key": ddb_key,
                         "Src_bucket": job["Src_bucket"],
@@ -651,31 +651,6 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
     Des_key = job['Des_key']
     logger.info(f'Start: {Src_bucket}/{Src_key}, Size: {Size}')
 
-    # DynamoDB log: ADD retry time, instance-id list, SET startTime
-    for retry in range(MaxRetry + 1):
-        try:
-            logger.info(f'Write log to DDB via start job: {Src_bucket}/{Src_key}')
-            table.update_item(
-                Key={
-                    "Key": Src_bucket + "/" + Src_key
-                },
-                UpdateExpression="ADD instance_id :id, retry_times :t "
-                                 "SET start_time = :s",
-                ExpressionAttributeValues={
-                    ":t": 1,
-                    ":id": {instance_id},
-                    ":s": int(time.time())
-                }
-            )
-            break
-        except Exception as e:
-            # 日志写不了
-            logger.error(f'Fail to put log to DDB at start {Src_bucket}/{Src_key}, {str(e)}')
-            if retry >= MaxRetry:
-                logger.error(f'Fail MaxRetry put log to DDB at start {Src_bucket}/{Src_key}')
-            else:
-                time.sleep(5 * retry)
-
     # Size lower than limit, not to check s3 exist parts, to save time
     multipart_uploaded_list = []
     if Size > ResumableThreshold:
@@ -709,12 +684,24 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
             multipart_uploaded_list
         )
         if response_check_upload == 'UPLOAD':
-            logger.info(f'Create multipart upload {Des_bucket}/{Des_key}')
             try:
+                logger.info(f'Create multipart upload: {Des_bucket}/{Des_key}')
                 response_new_upload = s3_des_client.create_multipart_upload(
                     Bucket=Des_bucket,
                     Key=Des_key,
                     StorageClass=StorageClass
+                )
+                logger.info(f'Write log to DDB in first round of job: {Src_bucket}/{Src_key}')
+                cur_time = time.time()
+                table.update_item(
+                    Key={
+                        "Key": Src_bucket + "/" + Src_key
+                    },
+                    UpdateExpression="SET firstTime = :s, firstTime_f=:s_format",
+                    ExpressionAttributeValues={
+                        ":s": int(cur_time),
+                        ":s_format": time.asctime(time.localtime(cur_time))
+                    }
                 )
             except Exception as e:
                 logger.error(f'Fail to create new multipart upload. {str(e)}')
@@ -744,6 +731,35 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
             Size,
             ChunkSize
         )  # 对于大于10000分片的大文件，自动调整为Chunksize_auto
+
+        # DynamoDB log: ADD retry time, instance-id list, SET startTime of this round
+        for retry in range(MaxRetry + 1):
+            try:
+                logger.info(f'Write log to DDB via start this round of job: {Src_bucket}/{Src_key}')
+                percent = int(len(partnumberList)/len(indexList))*100
+                cur_time = time.time()
+                table.update_item(
+                    Key={
+                        "Key": Src_bucket + "/" + Src_key
+                    },
+                    UpdateExpression="ADD instanceID :id, tryTimes :t "
+                                     "SET thisRoundStart=:s, thisRoundStart_f=:s_format, lastTimeProgress=:p",
+                    ExpressionAttributeValues={
+                        ":t": 1,
+                        ":id": {instance_id},
+                        ":s": int(cur_time),
+                        ":s_format": time.asctime(time.localtime(cur_time)),
+                        ":p": percent
+                    }
+                )
+                break
+            except Exception as e:
+                # 日志写不了
+                logger.error(f'Fail to put log to DDB at starting this round: {Src_bucket}/{Src_key}, {str(e)}')
+                if retry >= MaxRetry:
+                    logger.error(f'Fail MaxRetry put log to DDB at start {Src_bucket}/{Src_key}')
+                else:
+                    time.sleep(5 * retry)
 
         # Job Thread: uploadPart, 加入超时机制之后返回 "TIMEOUT"
         upload_etag_full = job_processor(
@@ -806,21 +822,23 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
         status = "ERR"
     for retry in range(MaxRetry + 1):
         try:
+            cur_time = time.time()
             table.update_item(
                 Key={
                     "Key": Src_bucket + "/" + Src_key
                 },
-                UpdateExpression="SET spent_time=:s-start_time ADD job_status :done",
+                UpdateExpression="SET totalTime=:s-firstTime, lastTimeProgress=:p ADD jobStatus :done",
                 ExpressionAttributeValues={
                     ":done": {status},
-                    ":s": int(time.time())
+                    ":s": int(cur_time),
+                    ":p": 100
                 }
             )
             break
         except Exception as e:
             logger.error(f'Fail to put log to DDB at end. {str(e)}')
             if retry >= MaxRetry:
-                logger.error(f'Fail MaxRetry to put log to DDB at end. {str(e)}')
+                logger.error(f'Fail MaxRetry to put log to DDB at end of job. {str(e)}')
             else:
                 time.sleep(5 * retry)
 
