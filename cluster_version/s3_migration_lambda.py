@@ -17,7 +17,7 @@ StorageClass = os.environ['StorageClass']
 ifVerifyMD5Twice = False
 
 ChunkSize = 5 * 1024 * 1024
-ResumableThreshold = 10
+ResumableThreshold = 10 * 1024 * 1024
 MaxRetry = 10
 MaxThread = 50
 MaxParallelFile = 1
@@ -33,7 +33,6 @@ logger.setLevel(logging.INFO)
 s3_config = Config(max_pool_connections=50)  # boto default 10
 
 region = os.environ['Des_region']
-instance_id = "Lambda"
 sqs = boto3.client('sqs')
 dynamodb = boto3.resource('dynamodb')
 ssm = boto3.client('ssm')
@@ -58,9 +57,16 @@ class TimeoutOrMaxRetry(Exception):
 
 
 def lambda_handler(event, context):
-    context = ssl._create_unverified_context()
-    response = urllib.request.urlopen(urllib.request.Request("https://checkip.amazonaws.com"), context=context).read()
-    print("Lambda IP Address:", response.decode('utf-8'))
+    try:
+        context = ssl._create_unverified_context()
+        response = urllib.request.urlopen(
+            urllib.request.Request("https://checkip.amazonaws.com"), timeout=3, context=context
+        ).read()
+        instance_id = "lambda-"+response.decode('utf-8')
+        print("Lambda or NAT IP Address:", instance_id)
+    except Exception as e:
+        logger.warning(f'Fail to connect to checkip.amazonaws.com')
+        instance_id = 'lambda-ip-timeout'
 
     logger.info(json.dumps(event, default=str))
 
