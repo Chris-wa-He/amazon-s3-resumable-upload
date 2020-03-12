@@ -16,9 +16,9 @@ try:
     ssm_parameter_credentials = cfg.get('Basic', 'ssm_parameter_credentials')
     JobType = cfg.get('Basic', 'JobType')
     StorageClass = cfg.get('Mode', 'StorageClass')
-    ifVerifyMD5Twice = cfg.getboolean('Mode', 'ifVerifyMD5Twice')
+    ifVerifyMD5Twice = cfg.getboolean('Debug', 'ifVerifyMD5Twice')
     Megabytes = 1024 * 1024
-    ChunkSize = cfg.getint('Mode', 'ChunkSize') * Megabytes
+    ChunkSize = cfg.getint('Debug', 'ChunkSize') * Megabytes
     ResumableThreshold = cfg.getint('Mode', 'ResumableThreshold') * Megabytes
     MaxRetry = cfg.getint('Mode', 'MaxRetry')
     MaxThread = cfg.getint('Mode', 'MaxThread')

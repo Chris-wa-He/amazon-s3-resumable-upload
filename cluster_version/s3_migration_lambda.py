@@ -10,27 +10,25 @@ Des_prefix_default = os.environ['Des_prefix_default']
 aws_access_key_id = os.environ['aws_access_key_id']
 aws_secret_access_key = os.environ['aws_secret_access_key']
 
-table_queue_name = "s3_migrate_file_list"
-ssm_parameter_bucket = "s3_migrate_bucket_para"
-ssm_parameter_credentials = "s3_migrate_credentials"
+table_queue_name = os.environ['table_queue_name']
 StorageClass = os.environ['StorageClass']
-ifVerifyMD5Twice = False
 
-ChunkSize = 5 * 1024 * 1024
-ResumableThreshold = 10 * 1024 * 1024
 MaxRetry = 10
 MaxThread = 50
 MaxParallelFile = 1
 JobTimeout = 3000
 
-CleanUnfinishedUpload = False
-LocalProfileMode = False
+ResumableThreshold = 5 * 1024 * 1024  # Accelerate to ignore get list
+CleanUnfinishedUpload = False  # For debug
+LocalProfileMode = False  # For debug
+ChunkSize = 5 * 1024 * 1024  # For debug
+ifVerifyMD5Twice = False  # For debug
+
+s3_config = Config(max_pool_connections=30)  # boto default 10
 
 # Set environment
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-s3_config = Config(max_pool_connections=50)  # boto default 10
 
 region = os.environ['Des_region']
 sqs = boto3.client('sqs')
@@ -104,7 +102,8 @@ def lambda_handler(event, context):
             }
 
     logger.info(f'Write log to DDB in first round of job: {job["Src_bucket"]} / {job["Src_key"]}')
-    with table.batch_writer() as ddb_batch:  # S3直接触发的把信息补上，其实不补是不影响业务流程的，只是方便统计
+    # S3直接触发的把信息补上，不补是不影响业务流程的，只是方便统计和补数据
+    with table.batch_writer() as ddb_batch:
         # write to ddb, auto batch
         for retry in range(MaxRetry + 1):
             try:
@@ -135,8 +134,3 @@ def lambda_handler(event, context):
         }
     else:
         raise TimeoutOrMaxRetry
-
-
-
-if __name__ == '__main__':
-    pass
