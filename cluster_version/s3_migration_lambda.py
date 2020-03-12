@@ -98,7 +98,7 @@ def lambda_handler(event, context):
             }
 
     logger.info(f'Write log to DDB in first round of job: {job["Src_bucket"]} / {job["Src_key"]}')
-    with table.batch_writer() as ddb_batch:
+    with table.batch_writer() as ddb_batch:  # S3直接触发的把信息补上，其实不补是不影响业务流程的，只是方便统计
         # write to ddb, auto batch
         for retry in range(MaxRetry + 1):
             try:

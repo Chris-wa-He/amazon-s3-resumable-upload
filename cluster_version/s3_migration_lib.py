@@ -857,11 +857,13 @@ def step_function(job, table, s3_src_client, s3_des_client, instance_id,
                 Key={
                     "Key": Src_bucket + "/" + Src_key
                 },
-                UpdateExpression="SET totalTime=:s-firstTime, lastTimeProgress=:p ADD jobStatus :done",
+                UpdateExpression="SET totalSpentTime=:s-firstTime, lastTimeProgress=:p, endTime=:s, endTime_f=:e"
+                                 " ADD jobStatus :done",
                 ExpressionAttributeValues={
                     ":done": {status},
                     ":s": int(cur_time),
-                    ":p": 100
+                    ":p": 100,
+                    ":e": time.asctime(time.localtime(cur_time))
                 }
             )
             break
